@@ -6,6 +6,8 @@ local ORANGE = "008FFF"
 local WHITE  = "FFFFFF"
 local BLACK  = "000000"
 
+local utils = require "mp.utils"
+
 ------------------------------------------------------------------ settings (saved between runs)
 local S = { font = 45, pos = 95, border = 3, volume = 100, color = "white", shade = true, size = "best" }
 local cfg_path = mp.command_native({ "expand-path", "~~/sp-settings.cfg" })
@@ -18,6 +20,7 @@ local function load_settings()
         if k == "font" and tonumber(v) then S.font = tonumber(v)
         elseif k == "pos" and tonumber(v) then S.pos = tonumber(v)
         elseif k == "border" and tonumber(v) then S.border = tonumber(v)
+        elseif k == "volume" and tonumber(v) then S.volume = clamp(tonumber(v), 0, 100)
         elseif k == "color" and (v == "white" or v == "black") then S.color = v
         elseif k == "shade" then S.shade = (v == "1")
         elseif k == "size" and (v == "best" or v == "fit" or v == "original") then S.size = v
@@ -49,6 +52,7 @@ end
 ------------------------------------------------------------------ state
 local W, H = 1280, 720
 local panel_open, dragging, fullscreen, paused = false, false, false, false
+local list_open, list_files, list_cur, list_scroll, list_dir = false, {}, 0, 0, ""
 local mouse = { x = -1, y = -1, hover = false }
 local last_move, last_render = -10, 0
 local toast_text, toast_until = nil, 0
@@ -237,6 +241,83 @@ local function set_subs_visible(v)
     toast(v and "Subtitles on" or "Subtitles off")
 end
 
+------------------------------------------------------------------ file list (other videos in the same folder)
+local VIDEO_EXT = { mp4 = true, mkv = true, webm = true, avi = true, mov = true, m4v = true,
+                    wmv = true, flv = true, ts = true, mpg = true, mpeg = true }
+
+local function list_rows()
+    return clamp(math.floor((H - 170 * scale()) / (34 * scale())), 3, 12)
+end
+
+-- "Episode 2" sorts before "Episode 10"
+local function natural_key(name)
+    return (name:lower():gsub("%d+", function(n)
+        if #n < 12 then n = string.rep("0", 12 - #n) .. n end
+        return n
+    end))
+end
+
+-- shorten text to n characters (safe for UTF-8)
+local function cut(str, n)
+    local count, i = 0, 1
+    while i <= #str do
+        local c = str:byte(i)
+        local len = (c >= 240 and 4) or (c >= 224 and 3) or (c >= 192 and 2) or 1
+        count = count + 1
+        if count > n then return str:sub(1, i - 1) .. "..." end
+        i = i + len
+    end
+    return str
+end
+
+local function build_list()
+    list_files, list_cur, list_dir = {}, 0, ""
+    local path = mp.get_property("path")
+    if not path then return end
+    if not (path:match("^%a:[\\/]") or path:match("^[\\/][\\/]") or path:match("^/")) then
+        path = utils.join_path(mp.get_property("working-directory") or "", path)
+    end
+    local dir, file = utils.split_path(path)
+    list_dir = dir
+    local items = {}
+    for _, n in ipairs(utils.readdir(dir, "files") or {}) do
+        local ext = n:match("%.([^.]+)$")
+        if ext and VIDEO_EXT[ext:lower()] then items[#items + 1] = { name = n, key = natural_key(n) } end
+    end
+    table.sort(items, function(a, b) return a.key < b.key end)
+    for i, it in ipairs(items) do
+        list_files[i] = it.name
+        if it.name == file then list_cur = i end
+    end
+end
+
+local function toggle_list()
+    if not has_file() then toast("Open a video first"); return end
+    if list_open then
+        list_open = false
+    else
+        build_list()
+        if #list_files == 0 then toast("No video files found in this folder", 1.8); return end
+        panel_open = false
+        list_open = true
+        list_scroll = clamp(list_cur - math.floor(list_rows() / 2), 0, math.max(0, #list_files - list_rows()))
+    end
+    render()
+end
+
+local function scroll_list(d)
+    list_scroll = clamp(list_scroll + d, 0, math.max(0, #list_files - list_rows()))
+    render()
+end
+
+local function play_list_item(i)
+    local name = list_files[i]
+    if not name then return end
+    list_open = false
+    mp.commandv("loadfile", utils.join_path(list_dir, name), "replace")
+    render()
+end
+
 local function change_volume(d)
     mp.commandv("add", "volume", tostring(d))
     S.volume = math.floor((mp.get_property_number("volume") or 0) + 0.5)
@@ -247,7 +328,7 @@ end
 ------------------------------------------------------------------ visibility of the bar
 local function bar_visible()
     if not has_file() then return false end
-    if panel_open or dragging then return true end
+    if panel_open or list_open or dragging then return true end
     local s = scale()
     if mouse.hover and mouse.y > H - 100 * s then return true end
     if not fullscreen and (mp.get_time() - last_move < 3 or paused) then return true end
@@ -294,7 +375,7 @@ local function draw_bar(out, s)
 
     -- seek bar
     local sx0 = px1 + 76 * s
-    local sx1 = W - pad - btn - 76 * s
+    local sx1 = W - pad - 2 * btn - 82 * s
     seek_area = { sx0 - 6 * s, yc - 16 * s, sx1 + 6 * s, yc + 16 * s }
     local over_seek = hovered(seek_area[1], seek_area[2], seek_area[3], seek_area[4])
     local th = (over_seek or dragging) and 9 * s or 5 * s
@@ -322,7 +403,20 @@ local function draw_bar(out, s)
         out[#out + 1] = circle((gx0 + gx1) / 2, yc, btn / 2, YELLOW, panel_open and "A0" or "C8")
     end
     out[#out + 1] = text((gx0 + gx1) / 2, yc, 5, 30 * s, panel_open and "001A12" or YELLOW, "\226\154\153", false, "Segoe UI Symbol")
-    hit[#hit + 1] = { gx0, yc - btn / 2, gx1, yc + btn / 2, function() panel_open = not panel_open end }
+    hit[#hit + 1] = { gx0, yc - btn / 2, gx1, yc + btn / 2, function() panel_open = not panel_open; list_open = false end }
+
+    -- file list button (three lines), next to the settings button
+    local mx1 = gx0 - 6 * s
+    local mx0 = mx1 - btn
+    local mcx = (mx0 + mx1) / 2
+    if list_open or hovered(mx0, yc - btn / 2, mx1, yc + btn / 2) then
+        out[#out + 1] = circle(mcx, yc, btn / 2, YELLOW, list_open and "A0" or "C8")
+    end
+    local lc = list_open and "001A12" or YELLOW
+    for k = -1, 1 do
+        out[#out + 1] = rect(mcx - 10 * s, yc + k * 7 * s - 1.5 * s, mcx + 10 * s, yc + k * 7 * s + 1.5 * s, lc)
+    end
+    hit[#hit + 1] = { mx0, yc - btn / 2, mx1, yc + btn / 2, function() toggle_list() end }
 end
 
 local function draw_panel(out, s)
@@ -408,10 +502,50 @@ local function draw_panel(out, s)
     end
 end
 
+local function draw_list(out, s)
+    local rows = list_rows()
+    local rowH, headH = 34 * s, 40 * s
+    local pw = clamp(560 * s, 300, W - 32 * s)
+    local shown = math.min(rows, #list_files)
+    local ph = headH + shown * rowH + 10 * s
+    local px1, py1 = W - 16 * s, H - 80 * s
+    local px0, py0 = px1 - pw, py1 - ph
+    panel_rect = { px0, py0, px1, py1 }
+    out[#out + 1] = rect(px0 - 1, py0 - 1, px1 + 1, py1 + 1, "20536B")
+    out[#out + 1] = rect(px0, py0, px1, py1, "0A1216", "10")
+    out[#out + 1] = text(px0 + 14 * s, py0 + headH / 2, 4, 14 * s, "8AB8C9",
+        string.format("FILES IN THIS FOLDER  (%d)", #list_files))
+    if #list_files > shown then
+        out[#out + 1] = text(px1 - 14 * s, py0 + headH / 2, 6, 13 * s, "9AA8B0",
+            string.format("%d-%d  (scroll)", list_scroll + 1, list_scroll + shown))
+    end
+    local maxch = math.max(10, math.floor((pw - 40 * s) / (8.4 * s)))
+    for r = 1, shown do
+        local i = list_scroll + r
+        local name = list_files[i]
+        if not name then break end
+        local y0 = py0 + headH + (r - 1) * rowH
+        local y1 = y0 + rowH
+        local cur = (i == list_cur)
+        local hov = hovered(px0, y0, px1, y1)
+        if cur then
+            out[#out + 1] = rect(px0 + 6 * s, y0 + 1 * s, px1 - 6 * s, y1 - 1 * s, YELLOW)
+        elseif hov then
+            out[#out + 1] = rect(px0 + 6 * s, y0 + 1 * s, px1 - 6 * s, y1 - 1 * s, "2A2A2A")
+        end
+        local label = name:gsub("%.[^.]+$", "")
+        label = label:gsub("[{}]", "-")
+        label = cut(label, maxch)
+        local col = cur and "001A12" or (hov and YELLOW or "E6F0F5")
+        out[#out + 1] = text(px0 + 18 * s, (y0 + y1) / 2, 4, 16 * s, col, label, cur)
+        hit[#hit + 1] = { px0, y0, px1, y1, function() play_list_item(i) end }
+    end
+end
+
 -- hide the cursor only while the video is playing (not paused, no settings panel, not dragging)
 local cursor_mode = nil
 local function update_cursor()
-    local want = (paused or panel_open or dragging or not has_file()) and "no" or "2000"
+    local want = (paused or panel_open or list_open or dragging or not has_file()) and "no" or "2000"
     if want ~= cursor_mode then
         cursor_mode = want
         mp.set_property("cursor-autohide", want)
@@ -429,11 +563,13 @@ render = function()
 
     if not has_file() then
         panel_open = false
+        list_open = false
         draw_idle(out, s)
     else
         if bar_visible() then
             draw_bar(out, s)
             if panel_open then draw_panel(out, s) end
+            if list_open then draw_list(out, s) end
         end
     end
 
@@ -464,7 +600,7 @@ local function seek_to_mouse(exact)
     local s = scale()
     local pad, btn = 16 * s, 44 * s
     local sx0 = pad + btn + 76 * s
-    local sx1 = W - pad - btn - 76 * s
+    local sx1 = W - pad - 2 * btn - 82 * s
     drag_ratio = clamp((mouse.x - sx0) / (sx1 - sx0), 0, 1)
     mp.commandv("seek", string.format("%.3f", drag_ratio * dur), exact and "absolute+exact" or "absolute+keyframes")
 end
@@ -503,7 +639,7 @@ local function on_mouse(ev, dbl)
     if panel_rect and inside(mouse.x, mouse.y, panel_rect) then return end
     if bar_top and mouse.y >= bar_top then return end
     -- clicking elsewhere closes the panel
-    if panel_open then panel_open = false; render(); return end
+    if panel_open or list_open then panel_open = false; list_open = false; render(); return end
 
     -- video area: click = play/pause, double click = fullscreen
     if dbl then
@@ -577,7 +713,10 @@ mp.add_periodic_timer(0.3, function()
 end)
 
 ------------------------------------------------------------------ keyboard messages (see input.conf)
-mp.register_script_message("sp-volume", function(d) change_volume(tonumber(d)) end)
+mp.register_script_message("sp-volume", function(d)
+    if list_open then scroll_list(tonumber(d) > 0 and -1 or 1) else change_volume(tonumber(d)) end
+end)
+mp.register_script_message("sp-list", function() toggle_list() end)
 mp.register_script_message("sp-sub-delay", function(d) change_delay(tonumber(d)) end)
 mp.register_script_message("sp-sub-font", function(d) change_font(tonumber(d)) end)
 mp.register_script_message("sp-sub-pos", function(d) change_pos(tonumber(d)) end)
@@ -595,7 +734,7 @@ end)
 mp.register_script_message("sp-load-sub", load_sub)
 mp.register_script_message("sp-open-video", open_video)
 mp.register_script_message("sp-escape", function()
-    if panel_open then panel_open = false; render()
+    if panel_open or list_open then panel_open = false; list_open = false; render()
     elseif fullscreen then mp.set_property("fullscreen", "no") end
 end)
 
