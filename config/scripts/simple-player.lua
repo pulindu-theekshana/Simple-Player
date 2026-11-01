@@ -20,7 +20,7 @@ local function load_settings()
         if k == "font" and tonumber(v) then S.font = tonumber(v)
         elseif k == "pos" and tonumber(v) then S.pos = tonumber(v)
         elseif k == "border" and tonumber(v) then S.border = tonumber(v)
-        elseif k == "volume" and tonumber(v) then S.volume = clamp(tonumber(v), 0, 100)
+        elseif k == "volume" and tonumber(v) then S.volume = math.max(0, math.min(100, tonumber(v)))
         elseif k == "color" and (v == "white" or v == "black") then S.color = v
         elseif k == "shade" then S.shade = (v == "1")
         elseif k == "size" and (v == "best" or v == "fit" or v == "original") then S.size = v
@@ -53,6 +53,10 @@ end
 local W, H = 1280, 720
 local panel_open, dragging, fullscreen, paused = false, false, false, false
 local list_open, list_files, list_cur, list_scroll, list_dir = false, {}, 0, 0, ""
+local list_sel = 0                                -- row selected with the arrow keys / mouse
+local play_path, play_pos, play_dur = nil, 0, 0   -- the video playing now
+local resume_path, resume_pos = nil, 0            -- last video of the previous session
+local last_file = mp.command_native({ "expand-path", "~~/sp-last.cfg" })
 local mouse = { x = -1, y = -1, hover = false }
 local last_move, last_render = -10, 0
 local toast_text, toast_until = nil, 0
@@ -270,13 +274,16 @@ local function cut(str, n)
     return str
 end
 
+local function abs_path(path)
+    if path:match("^%a:[\\/]") or path:match("^[\\/][\\/]") or path:match("^/") then return path end
+    return utils.join_path(mp.get_property("working-directory") or "", path)
+end
+
 local function build_list()
     list_files, list_cur, list_dir = {}, 0, ""
     local path = mp.get_property("path")
     if not path then return end
-    if not (path:match("^%a:[\\/]") or path:match("^[\\/][\\/]") or path:match("^/")) then
-        path = utils.join_path(mp.get_property("working-directory") or "", path)
-    end
+    path = abs_path(path)
     local dir, file = utils.split_path(path)
     list_dir = dir
     local items = {}
@@ -300,6 +307,7 @@ local function toggle_list()
         if #list_files == 0 then toast("No video files found in this folder", 1.8); return end
         panel_open = false
         list_open = true
+        list_sel = list_cur > 0 and list_cur or 1
         list_scroll = clamp(list_cur - math.floor(list_rows() / 2), 0, math.max(0, #list_files - list_rows()))
     end
     render()
@@ -310,12 +318,55 @@ local function scroll_list(d)
     render()
 end
 
+local function move_sel(d)
+    list_sel = clamp(list_sel + d, 1, #list_files)
+    local rows = list_rows()
+    if list_sel <= list_scroll then
+        list_scroll = list_sel - 1
+    elseif list_sel > list_scroll + rows then
+        list_scroll = list_sel - rows
+    end
+    render()
+end
+
 local function play_list_item(i)
     local name = list_files[i]
     if not name then return end
     list_open = false
     mp.commandv("loadfile", utils.join_path(list_dir, name), "replace")
     render()
+end
+
+------------------------------------------------------------------ remember the last video (offered on the start screen)
+local function load_last()
+    local f = io.open(last_file, "r")
+    if not f then return end
+    for line in f:lines() do
+        local k, v = line:match("^(%w+)=(.-)%s*$")
+        if k == "path" and v ~= "" then resume_path = v
+        elseif k == "pos" and tonumber(v) then resume_pos = tonumber(v) end
+    end
+    f:close()
+    if resume_path and not utils.file_info(resume_path) then resume_path = nil end
+end
+
+local function save_last()
+    if not play_path or play_path:match("^%a[%w+.-]*://") then return end
+    local finished = play_dur > 0 and play_pos >= play_dur - 10
+    if play_pos <= 5 and not finished then return end   -- keep the older memory
+    local f = io.open(last_file, "w")
+    if not f then return end
+    if not finished then   -- a finished video is forgotten
+        f:write("path=" .. abs_path(play_path) .. "\n", string.format("pos=%.1f\n", play_pos))
+    end
+    f:close()
+end
+
+local function resume_last()
+    if not resume_path then return end
+    local p, pos = resume_path, resume_pos
+    resume_path = nil
+    mp.commandv("loadfile", p, "replace", "-1", string.format("start=%.1f", pos))
 end
 
 local function change_volume(d)
@@ -342,6 +393,16 @@ local function draw_idle(out, s)
         W / 2 + 24 * s, H / 2 - 70 * s, "001A12")
     out[#out + 1] = text(W / 2, H / 2 + 8 * s, 5, 46 * s, YELLOW, "Simple Player", true)
     out[#out + 1] = text(W / 2, H / 2 + 56 * s, 5, 20 * s, "A8B8C0", "Click anywhere, drop a video here, or press O")
+    if resume_path then
+        local name = resume_path:match("([^\\/]+)$") or resume_path
+        name = name:gsub("%.[^.]+$", "")
+        name = name:gsub("[{}]", "-")
+        name = cut(name, 70)
+        out[#out + 1] = text(W / 2, H / 2 + 112 * s, 5, 20 * s, "E6F0F5",
+            "Do you want to continue \"" .. name .. "\"?  (" .. fmt(resume_pos) .. ")")
+        out[#out + 1] = button(W / 2 - 90 * s, H / 2 + 140 * s, W / 2 + 90 * s, H / 2 + 182 * s,
+            "Resume  (R)", true, resume_last)
+    end
 end
 
 local function draw_bar(out, s)
@@ -519,6 +580,13 @@ local function draw_list(out, s)
         out[#out + 1] = text(px1 - 14 * s, py0 + headH / 2, 6, 13 * s, "9AA8B0",
             string.format("%d-%d  (scroll)", list_scroll + 1, list_scroll + shown))
     end
+    -- moving the mouse over a row selects it (the arrow keys keep working in between)
+    if mp.get_time() - last_move < 0.15 then
+        for r = 1, shown do
+            local ry = py0 + headH + (r - 1) * rowH
+            if hovered(px0, ry, px1, ry + rowH) then list_sel = list_scroll + r end
+        end
+    end
     local maxch = math.max(10, math.floor((pw - 40 * s) / (8.4 * s)))
     for r = 1, shown do
         local i = list_scroll + r
@@ -527,16 +595,19 @@ local function draw_list(out, s)
         local y0 = py0 + headH + (r - 1) * rowH
         local y1 = y0 + rowH
         local cur = (i == list_cur)
-        local hov = hovered(px0, y0, px1, y1)
+        local sel = (i == list_sel)
         if cur then
             out[#out + 1] = rect(px0 + 6 * s, y0 + 1 * s, px1 - 6 * s, y1 - 1 * s, YELLOW)
-        elseif hov then
+        elseif sel then
             out[#out + 1] = rect(px0 + 6 * s, y0 + 1 * s, px1 - 6 * s, y1 - 1 * s, "2A2A2A")
+        end
+        if sel then
+            out[#out + 1] = rect(px0 + 6 * s, y0 + 1 * s, px0 + 10 * s, y1 - 1 * s, cur and "001A12" or ORANGE)
         end
         local label = name:gsub("%.[^.]+$", "")
         label = label:gsub("[{}]", "-")
         label = cut(label, maxch)
-        local col = cur and "001A12" or (hov and YELLOW or "E6F0F5")
+        local col = cur and "001A12" or (sel and YELLOW or "E6F0F5")
         out[#out + 1] = text(px0 + 18 * s, (y0 + y1) / 2, 4, 16 * s, col, label, cur)
         hit[#hit + 1] = { px0, y0, px1, y1, function() play_list_item(i) end }
     end
@@ -617,7 +688,13 @@ local function on_mouse(ev, dbl)
     end
     if ev ~= "down" and ev ~= "press" then return end
 
-    if not has_file() then open_video(); return end
+    if not has_file() then
+        for i = #hit, 1, -1 do
+            local a = hit[i]
+            if inside(mouse.x, mouse.y, a) then a[5](); render(); return end
+        end
+        open_video(); return
+    end
 
     -- seek bar: start dragging
     if seek_area and inside(mouse.x, mouse.y, seek_area) then
@@ -665,7 +742,7 @@ mp.observe_property("mouse-pos", "native", function(_, m)
             seek_to_mouse(false)
         end
         render()
-    elseif bar_visible() or was_vis then
+    elseif bar_visible() or was_vis or (resume_path and not has_file()) then
         if mp.get_time() - last_render > 0.03 then render() end
     end
 end)
@@ -681,13 +758,23 @@ paused = nil
 
 mp.observe_property("fullscreen", "bool", function(_, v) fullscreen = v and true or false; render() end)
 mp.observe_property("osd-width", "number", function() render() end)
-mp.observe_property("path", "string", function() render() end)
-mp.observe_property("duration", "number", function() render() end)
+mp.observe_property("path", "string", function(_, p)
+    if p ~= play_path then
+        save_last()   -- remember the video we are leaving
+        play_path, play_pos, play_dur = p, 0, 0
+    end
+    render()
+end)
+mp.observe_property("duration", "number", function(_, v)
+    if v then play_dur = v end
+    render()
+end)
 mp.observe_property("sub-delay", "number", function() if panel_open then render() end end)
 mp.observe_property("speed", "number", function() if panel_open then render() end end)
 mp.observe_property("sub-visibility", "bool", function() if panel_open then render() end end)
 
-mp.observe_property("time-pos", "number", function()
+mp.observe_property("time-pos", "number", function(_, v)
+    if v then play_pos = v end
     if (last_vis or panel_open) and mp.get_time() - last_render > 0.2 then render() end
 end)
 
@@ -712,10 +799,22 @@ mp.add_periodic_timer(0.3, function()
     end
 end)
 
+-- save the last video: when closing, when a video ends, and every 5 seconds while playing
+mp.register_event("shutdown", save_last)
+mp.register_event("end-file", save_last)
+mp.add_periodic_timer(5, function() if not paused then save_last() end end)
+
 ------------------------------------------------------------------ keyboard messages (see input.conf)
 mp.register_script_message("sp-volume", function(d)
+    if list_open then move_sel(tonumber(d) > 0 and -1 or 1) else change_volume(tonumber(d)) end
+end)
+mp.register_script_message("sp-wheel", function(d)
     if list_open then scroll_list(tonumber(d) > 0 and -1 or 1) else change_volume(tonumber(d)) end
 end)
+mp.register_script_message("sp-enter", function()
+    if list_open then play_list_item(list_sel) else mp.commandv("cycle", "fullscreen") end
+end)
+mp.register_script_message("sp-resume", function() if not has_file() then resume_last() end end)
 mp.register_script_message("sp-list", function() toggle_list() end)
 mp.register_script_message("sp-sub-delay", function(d) change_delay(tonumber(d)) end)
 mp.register_script_message("sp-sub-font", function(d) change_font(tonumber(d)) end)
@@ -740,6 +839,7 @@ end)
 
 ------------------------------------------------------------------ start
 load_settings()
+load_last()
 mp.set_property("volume", tostring(S.volume))
 apply_sub()
 apply_size()
