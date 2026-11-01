@@ -1,14 +1,18 @@
-# Your personal saved settings (created by the player)
+# Your personal saved settings and last-played video (created by the player)
 config/sp-settings.cfg
+config/sp-last.cfg
 
-# Resume positions saved by mpv
+# Old resume positions saved by mpv (no longer used)
 config/watch_later/
 
 # Logs
 *.log
 
-# Local mpv download (if you put mpv.exe inside the project)
+# Local copy of mpv.exe, SimplePlayer.exe and rcedit (big binaries)
 mpv/
+
+# Installer output (build it with installer.iss)
+dist/
 
 # Archives
 *.zip
