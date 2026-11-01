@@ -1,0 +1,23 @@
+# Your personal saved settings (created by the player)
+config/sp-settings.cfg
+
+# Resume positions saved by mpv
+config/watch_later/
+
+# Logs
+*.log
+
+# Local mpv download (if you put mpv.exe inside the project)
+mpv/
+
+# Archives
+*.zip
+
+# Old Electron version (if still around)
+node_modules/
+
+# OS and editor files
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
