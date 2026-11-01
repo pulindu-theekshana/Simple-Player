@@ -57,6 +57,7 @@ local list_sel = 0                                -- row selected with the arrow
 local play_path, play_pos, play_dur = nil, 0, 0   -- the video playing now
 local resume_path, resume_pos = nil, 0            -- last video of the previous session
 local last_file = mp.command_native({ "expand-path", "~~/sp-last.cfg" })
+local keys_open = false                           -- the "Shortcut keys" page of the settings panel
 local mouse = { x = -1, y = -1, hover = false }
 local last_move, last_render = -10, 0
 local toast_text, toast_until = nil, 0
@@ -463,7 +464,7 @@ local function draw_bar(out, s)
     if panel_open or hovered(gx0, yc - btn / 2, gx1, yc + btn / 2) then
         out[#out + 1] = circle((gx0 + gx1) / 2, yc, btn / 2, YELLOW, panel_open and "A0" or "C8")
     end
-    out[#out + 1] = text((gx0 + gx1) / 2, yc, 5, 30 * s, panel_open and "001A12" or YELLOW, "\226\154\153", false, "Segoe UI Symbol")
+    out[#out + 1] = text((gx0 + gx1) / 2, yc, 5, 40 * s, panel_open and "001A12" or YELLOW, "\226\154\153", false, "Segoe UI Symbol")
     hit[#hit + 1] = { gx0, yc - btn / 2, gx1, yc + btn / 2, function() panel_open = not panel_open; list_open = false end }
 
     -- file list button (three lines), next to the settings button
@@ -482,7 +483,7 @@ end
 
 local function draw_panel(out, s)
     local pw, rowH = 450 * s, 38 * s
-    local keysH = 4 * 19 * s + 16 * s
+    local keysH = 46 * s
     local ph = 12 * s + 9 * rowH + keysH
     local px1, py1 = W - 16 * s, H - 80 * s
     local px0, py0 = px1 - pw, py1 - ph
@@ -550,17 +551,65 @@ local function draw_panel(out, s)
         { label = "1.5x", on = speed == 1.5, fn = function() set_speed(1.5) end },
         { label = "2x", on = speed == 2, fn = function() set_speed(2) end } })
 
-    local ky = py0 + 6 * s + 9 * rowH + 14 * s
-    out[#out + 1] = rect(px0 + 14 * s, ky - 8 * s, px1 - 14 * s, ky - 7 * s, "20536B")
-    local lines = {
-        "Space play/pause   \226\134\144 \226\134\146 \194\1775s   \226\134\145 \226\134\147 volume   Enter fullscreen",
-        "F / B next / previous frame   M mute   A screen size",
-        ". / ,  subtitle delay   Shift+\226\134\145\226\134\147 size   Alt+\226\134\145\226\134\147 position",
-        "C color   H shade   S subtitles   O open video",
-    }
-    for i, l in ipairs(lines) do
-        out[#out + 1] = text(px0 + 14 * s, ky + (i - 0.5) * 19 * s, 4, 12 * s, "9AA8B0", l)
+    local by = py0 + 6 * s + 9 * rowH + 8 * s
+    out[#out + 1] = rect(px0 + 14 * s, by - 5 * s, px1 - 14 * s, by - 4 * s, "20536B")
+    out[#out + 1] = button(px0 + 14 * s, by, px1 - 14 * s, by + 32 * s, "Shortcut keys", false,
+        function() keys_open = true end)
+end
+
+local KEYS_LEFT = {
+    { "Space", "Play / pause" },
+    { "\226\134\144  \226\134\146", "Back / forward 5 sec" },
+    { "\226\134\145  \226\134\147", "Volume +5 / -5" },
+    { "Mouse wheel", "Volume" },
+    { "Enter", "Fullscreen window" },
+    { "Esc", "Close panel / exit fullscreen" },
+    { "F  /  B", "Next / previous frame" },
+    { "M", "Mute" },
+    { "A", "Screen size: best / fit / original" },
+    { "O", "Open a video" },
+    { "L", "Episode list" },
+    { "R", "Resume last video (start screen)" },
+}
+local KEYS_RIGHT = {
+    { ".  /  ,", "Subtitle delay +0.5 / -0.5 sec" },
+    { "Shift + \226\134\145 \226\134\147", "Subtitle font size" },
+    { "Shift + \226\134\144 \226\134\146", "Subtitle shade size" },
+    { "Alt + \226\134\145 \226\134\147", "Subtitle position" },
+    { "C", "Subtitle color: white / black" },
+    { "H", "Subtitle shade on / off" },
+    { "S", "Load a subtitle file" },
+    { "Seek bar", "Click or drag to jump" },
+    { "Click video", "Play / pause" },
+    { "Double click", "Fullscreen window" },
+    { "Drop a file", "Open that video" },
+    { "List  \226\134\145 \226\134\147", "Choose episode" },
+    { "List  Enter", "Play chosen episode" },
+    { "List  wheel", "Scroll the list" },
+}
+
+local function draw_keys(out, s)
+    local rowH, headH, footH = 28 * s, 44 * s, 52 * s
+    local rows = math.max(#KEYS_LEFT, #KEYS_RIGHT)
+    local pw = clamp(800 * s, 300, W - 32 * s)
+    local ph = headH + rows * rowH + footH
+    local px1, py1 = W - 16 * s, H - 80 * s
+    local px0, py0 = px1 - pw, py1 - ph
+    panel_rect = { px0, py0, px1, py1 }
+    out[#out + 1] = rect(px0 - 1, py0 - 1, px1 + 1, py1 + 1, "20536B")
+    out[#out + 1] = rect(px0, py0, px1, py1, "0A1216", "10")
+    out[#out + 1] = text(px0 + 16 * s, py0 + headH / 2, 4, 15 * s, "8AB8C9", "SHORTCUT KEYS")
+    local colw = (pw - 32 * s) / 2
+    for c, list in ipairs({ KEYS_LEFT, KEYS_RIGHT }) do
+        local x = px0 + 16 * s + (c - 1) * colw
+        for i, it in ipairs(list) do
+            local y = py0 + headH + (i - 0.5) * rowH
+            out[#out + 1] = text(x, y, 4, 14 * s, YELLOW, it[1], true)
+            out[#out + 1] = text(x + 150 * s, y, 4, 14 * s, "E6F0F5", it[2])
+        end
     end
+    out[#out + 1] = button(px0 + 14 * s, py1 - footH + 10 * s, px1 - 14 * s, py1 - 10 * s, "Back", false,
+        function() keys_open = false end)
 end
 
 local function draw_list(out, s)
@@ -624,6 +673,7 @@ local function update_cursor()
 end
 
 render = function()
+    if not panel_open then keys_open = false end
     update_cursor()
     last_render = mp.get_time()
     local w, h = mp.get_osd_size()
@@ -639,13 +689,15 @@ render = function()
     else
         if bar_visible() then
             draw_bar(out, s)
-            if panel_open then draw_panel(out, s) end
+            if panel_open then
+                if keys_open then draw_keys(out, s) else draw_panel(out, s) end
+            end
             if list_open then draw_list(out, s) end
         end
     end
 
     if toast_text and mp.get_time() < toast_until then
-        out[#out + 1] = text(W - 24 * s, 22 * s, 9, 24 * s, YELLOW, toast_text, true, nil, 2)
+        out[#out + 1] = text(24 * s, 22 * s, 7, 24 * s, YELLOW, toast_text, true, nil, 2)
     end
 
     last_vis = bar_visible()
@@ -833,7 +885,8 @@ end)
 mp.register_script_message("sp-load-sub", load_sub)
 mp.register_script_message("sp-open-video", open_video)
 mp.register_script_message("sp-escape", function()
-    if panel_open or list_open then panel_open = false; list_open = false; render()
+    if keys_open then keys_open = false; render()
+    elseif panel_open or list_open then panel_open = false; list_open = false; render()
     elseif fullscreen then mp.set_property("fullscreen", "no") end
 end)
 
